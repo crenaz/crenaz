@@ -1,5 +1,5 @@
 - 👋 Hi, I’m @crenaz
-- 👀 I’m interested in distributed systems development using micro-service architecture
+- 👀 I’m interested in languages ~distributed systems development using micro-service architecture~
 - 🌱 I’m currently learning OCaml ~Webpack5, Solid.js, React18 and Next13~
 - 💞️ I’m looking to collaborate on pretty much any project
 - 📫 How to reach me ... well, here or [there](https://agustincrespo.com)
