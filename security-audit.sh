@@ -58,8 +58,7 @@ if ! gh auth status &> /dev/null; then
 fi
 
 # GraphQL query for Dependabot alerts
-GRAPHQL_QUERY='
-query($owner: String!, $first: Int!, $after: String) {
+GRAPHQL_QUERY='query($owner: String!, $first: Int!, $after: String) {
   repositoryOwner(login: $owner) {
     repositories(first: $first, after: $after, orderBy: {field: NAME, direction: ASC}) {
       pageInfo {
@@ -86,8 +85,9 @@ query($owner: String!, $first: Int!, $after: String) {
                 summary
                 description
                 cvss {
-                score
-                vector
+                  score
+                  vector
+                }
               }
               firstPatchedVersion {
                 identifier
@@ -100,8 +100,7 @@ query($owner: String!, $first: Int!, $after: String) {
       }
     }
   }
-}
-'
+}'
 
 echo -e "${BLUE}Fetching repository data...${NC}" | tee -a "$LOG_FILE"
 
@@ -119,59 +118,56 @@ TOTAL_ALERTS=0
 
 # Paginate through all repositories
 while true; do
+    echo -e "${BLUE}Fetching repositories (cursor: ${CURSOR:-start})...${NC}" | tee -a "$LOG_FILE"
+    
+    # Use stdin for query to avoid shell escaping issues
     if [ -z "$CURSOR" ]; then
-        RESPONSE=$(gh api graphql \
-            -f owner="$GITHUB_USER" \
-            -f first=100 \
-            -f query="$GRAPHQL_QUERY")
+        RESPONSE=$(gh api graphql -F owner="$GITHUB_USER" -F first=100 -F after=null --input - <<< "$GRAPHQL_QUERY")
     else
-        RESPONSE=$(gh api graphql \
-            -f owner="$GITHUB_USER" \
-            -f first=100 \
-            -f after="$CURSOR" \
-            -f query="$GRAPHQL_QUERY")
+        RESPONSE=$(gh api graphql -F owner="$GITHUB_USER" -F first=100 -F after="$CURSOR" --input - <<< "$GRAPHQL_QUERY")
+    fi
+    
+    # Check for errors
+    if echo "$RESPONSE" | jq -e '.errors' &>/dev/null; then
+        ERROR_MSG=$(echo "$RESPONSE" | jq -r '.errors[0].message')
+        echo -e "${RED}GraphQL Error: $ERROR_MSG${NC}" | tee -a "$LOG_FILE"
+        exit 1
     fi
 
-    # Extract repositories and alerts
-    REPOS=$(echo "$RESPONSE" | jq -r '.data.repositoryOwner.repositories.nodes[]')
+    # Extract repositories
+    REPOS=$(echo "$RESPONSE" | jq -r '.data.repositoryOwner.repositories.nodes')
     
-    echo "$REPOS" | jq -s '.' | while IFS= read -r repo_json; do
-        if [ -n "$repo_json" ] && [ "$repo_json" != "[]" ]; then
-            echo "$repo_json" | jq -c '.[]' | while read -r repo; do
-                REPO_NAME=$(echo "$repo" | jq -r '.name')
-                REPO_URL=$(echo "$repo" | jq -r '.url')
-                IS_PRIVATE=$(echo "$repo" | jq -r '.isPrivate')
-                ALERT_COUNT=$(echo "$repo" | jq -r '.vulnerabilityAlerts.totalCount')
-                
-                ((TOTAL_REPOS++))
-                
-                if [ "$ALERT_COUNT" -gt 0 ]; then
-                    ((REPOS_WITH_ALERTS++))
-                    ((TOTAL_ALERTS+=ALERT_COUNT))
-                    echo -e "${YELLOW}⚠️  $REPO_NAME: $ALERT_COUNT alert(s)${NC}" | tee -a "$LOG_FILE"
-                else
-                    echo -e "${GREEN}✓ $REPO_NAME: No alerts${NC}" | tee -a "$LOG_FILE"
-                fi
-                
-                # Add to JSON report
-                if [ "$FIRST_REPO" = false ]; then
-                    echo "," >> "$TEMP_FILE"
-                fi
-                
-                echo "$repo" | jq \
-                    --arg url "$REPO_URL" \
-                    --arg private "$IS_PRIVATE" \
-                    '{
-                        name: .name,
-                        url: $url,
-                        isPrivate: ($private | split("") | .[0:1] | join("") == "t"),
-                        alertCount: .vulnerabilityAlerts.totalCount,
-                        alerts: .vulnerabilityAlerts.nodes
-                    }' >> "$TEMP_FILE"
-                
-                FIRST_REPO=false
-            done
+    # Process each repository
+    echo "$REPOS" | jq -c '.[]' | while read -r repo; do
+        REPO_NAME=$(echo "$repo" | jq -r '.name')
+        REPO_URL=$(echo "$repo" | jq -r '.url')
+        IS_PRIVATE=$(echo "$repo" | jq -r '.isPrivate')
+        ALERT_COUNT=$(echo "$repo" | jq -r '.vulnerabilityAlerts.totalCount')
+        
+        ((TOTAL_REPOS++))
+        
+        if [ "$ALERT_COUNT" -gt 0 ]; then
+            ((REPOS_WITH_ALERTS++))
+            ((TOTAL_ALERTS+=ALERT_COUNT))
+            echo -e "${YELLOW}⚠️  $REPO_NAME: $ALERT_COUNT alert(s)${NC}" | tee -a "$LOG_FILE"
+        else
+            echo -e "${GREEN}✓ $REPO_NAME: No alerts${NC}" | tee -a "$LOG_FILE"
         fi
+        
+        # Add to JSON report
+        if [ "$FIRST_REPO" = false ]; then
+            echo "," >> "$TEMP_FILE"
+        fi
+        
+        echo "$repo" | jq '{
+            name: .name,
+            url: .url,
+            isPrivate: .isPrivate,
+            alertCount: .vulnerabilityAlerts.totalCount,
+            alerts: .vulnerabilityAlerts.nodes
+        }' >> "$TEMP_FILE"
+        
+        FIRST_REPO=false
     done
     
     # Check for next page
