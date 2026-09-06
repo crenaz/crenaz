@@ -65,85 +65,81 @@ echo "  \"user\": \"$GITHUB_USER\"," >> "$TEMP_FILE"
 echo "  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> "$TEMP_FILE"
 echo "  \"repositories\": [" >> "$TEMP_FILE"
 
-CURSOR="null"
+CURSOR=""
 FIRST_REPO=true
 TOTAL_REPOS=0
 REPOS_WITH_ALERTS=0
 TOTAL_ALERTS=0
+PAGE=1
 
-# Paginate through all repositories
+# Paginate through all repositories using REST API (more reliable than GraphQL)
 while true; do
-    echo -e "${BLUE}Fetching repositories...${NC}" | tee -a "$LOG_FILE"
+    echo -e "${BLUE}Fetching repositories (page $PAGE)...${NC}" | tee -a "$LOG_FILE"
     
-    # Build query with cursor (removed cvss.vector which doesn't exist)
-    if [ "$CURSOR" = "null" ]; then
-        QUERY="query { repositoryOwner(login: \"$GITHUB_USER\") { repositories(first: 100, orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage endCursor } nodes { name url isPrivate vulnerabilityAlerts(first: 100) { totalCount nodes { number state dismissReason securityVulnerability { severity package { name ecosystem } advisory { summary description cvss { score } } firstPatchedVersion { identifier } } vulnerableManifestFilename vulnerableManifestPath } } } } } }"
-    else
-        QUERY="query { repositoryOwner(login: \"$GITHUB_USER\") { repositories(first: 100, after: \"$CURSOR\", orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage endCursor } nodes { name url isPrivate vulnerabilityAlerts(first: 100) { totalCount nodes { number state dismissReason securityVulnerability { severity package { name ecosystem } advisory { summary description cvss { score } } firstPatchedVersion { identifier } } vulnerableManifestFilename vulnerableManifestPath } } } } } }"
-    fi
-    
-    # Execute query
-    RESPONSE=$(gh api graphql --raw-field query="$QUERY" 2>&1) || {
-        echo -e "${RED}Error fetching data: $RESPONSE${NC}" | tee -a "$LOG_FILE"
+    # Use REST API to list repositories
+    REPOS_RESPONSE=$(gh api -H "Accept: application/vnd.github+json" "/users/$GITHUB_USER/repos?per_page=100&page=$PAGE&sort=updated" 2>&1) || {
+        echo -e "${RED}Error fetching repositories: $REPOS_RESPONSE${NC}" | tee -a "$LOG_FILE"
         exit 1
     }
     
-    # Check for errors
-    if echo "$RESPONSE" | jq -e '.errors' &>/dev/null; then
-        ERROR_MSG=$(echo "$RESPONSE" | jq -r '.errors[0].message // .errors[0] // .')
-        echo -e "${RED}GraphQL Error: $ERROR_MSG${NC}" | tee -a "$LOG_FILE"
-        exit 1
-    fi
-
-    # Extract repositories
-    REPOS=$(echo "$RESPONSE" | jq -r '.data.repositoryOwner.repositories.nodes')
+    # Check if we got any repos back
+    REPO_COUNT=$(echo "$REPOS_RESPONSE" | jq 'length')
     
-    # Process each repository
-    if [ "$REPOS" != "null" ] && [ -n "$REPOS" ]; then
-        echo "$REPOS" | jq -c '.[]' | while read -r repo; do
-            if [ -z "$repo" ]; then
-                continue
-            fi
-            
-            REPO_NAME=$(echo "$repo" | jq -r '.name')
-            REPO_URL=$(echo "$repo" | jq -r '.url')
-            IS_PRIVATE=$(echo "$repo" | jq -r '.isPrivate')
-            ALERT_COUNT=$(echo "$repo" | jq -r '.vulnerabilityAlerts.totalCount')
-            
-            ((TOTAL_REPOS++))
-            
-            if [ "$ALERT_COUNT" -gt 0 ]; then
-                ((REPOS_WITH_ALERTS++))
-                ((TOTAL_ALERTS+=ALERT_COUNT))
-                echo -e "${YELLOW}⚠️  $REPO_NAME: $ALERT_COUNT alert(s)${NC}" | tee -a "$LOG_FILE"
-            else
-                echo -e "${GREEN}✓ $REPO_NAME: No alerts${NC}" | tee -a "$LOG_FILE"
-            fi
-            
-            # Add to JSON report
-            if [ "$FIRST_REPO" = false ]; then
-                echo "," >> "$TEMP_FILE"
-            fi
-            
-            echo "$repo" | jq '{
-                name: .name,
-                url: .url,
-                isPrivate: .isPrivate,
-                alertCount: .vulnerabilityAlerts.totalCount,
-                alerts: .vulnerabilityAlerts.nodes
-            }' >> "$TEMP_FILE"
-            
-            FIRST_REPO=false
-        done
-    fi
-    
-    # Check for next page
-    HAS_NEXT=$(echo "$RESPONSE" | jq -r '.data.repositoryOwner.repositories.pageInfo.hasNextPage')
-    if [ "$HAS_NEXT" = "false" ] || [ "$HAS_NEXT" = "null" ]; then
+    if [ "$REPO_COUNT" -eq 0 ]; then
+        echo -e "${BLUE}No more repositories to fetch.${NC}" | tee -a "$LOG_FILE"
         break
     fi
-    CURSOR=$(echo "$RESPONSE" | jq -r '.data.repositoryOwner.repositories.pageInfo.endCursor')
-    if [ "$CURSOR" = "null" ]; then
+    
+    # Process each repository
+    echo "$REPOS_RESPONSE" | jq -c '.[]' | while read -r repo; do
+        if [ -z "$repo" ]; then
+            continue
+        fi
+        
+        REPO_NAME=$(echo "$repo" | jq -r '.name')
+        REPO_URL=$(echo "$repo" | jq -r '.html_url')
+        IS_PRIVATE=$(echo "$repo" | jq -r '.private')
+        
+        # Fetch vulnerability alerts for this specific repo
+        echo -e "${BLUE}  Checking $REPO_NAME...${NC}" | tee -a "$LOG_FILE"
+        
+        ALERTS_RESPONSE=$(gh api -H "Accept: application/vnd.github+json" "/repos/$GITHUB_USER/$REPO_NAME/vulnerability-alerts" 2>&1) || {
+            # Some repos may not have vulnerability alerts enabled
+            ALERTS_RESPONSE="[]"
+        }
+        
+        ALERT_COUNT=$(echo "$ALERTS_RESPONSE" | jq 'length')
+        
+        ((TOTAL_REPOS++))
+        
+        if [ "$ALERT_COUNT" -gt 0 ]; then
+            ((REPOS_WITH_ALERTS++))
+            ((TOTAL_ALERTS+=ALERT_COUNT))
+            echo -e "${YELLOW}⚠️  $REPO_NAME: $ALERT_COUNT alert(s)${NC}" | tee -a "$LOG_FILE"
+        else
+            echo -e "${GREEN}✓ $REPO_NAME: No alerts${NC}" | tee -a "$LOG_FILE"
+        fi
+        
+        # Add to JSON report
+        if [ "$FIRST_REPO" = false ]; then
+            echo "," >> "$TEMP_FILE"
+        fi
+        
+        echo "$repo" | jq --argjson alerts "$ALERTS_RESPONSE" '{
+            name: .name,
+            url: .html_url,
+            isPrivate: .private,
+            alertCount: ($alerts | length),
+            alerts: $alerts
+        }' >> "$TEMP_FILE"
+        
+        FIRST_REPO=false
+    done
+    
+    ((PAGE++))
+    
+    # Check if we got a full page (if less than 100, we're on the last page)
+    if [ "$REPO_COUNT" -lt 100 ]; then
         break
     fi
 done
@@ -177,8 +173,11 @@ if [ "$TOTAL_ALERTS" -gt 0 ]; then
     
     jq -r '.repositories[] | select(.alertCount > 0) | 
         "\(.name) (\(.alertCount) alerts):\n" +
-        (.alerts[] | "  - [\(.securityVulnerability.severity)] \(.securityVulnerability.package.name): \(.securityVulnerability.advisory.summary)\n    File: \(.vulnerableManifestPath)\n") +
-        "\n"' "$OUTPUT_FILE" | tee -a "$LOG_FILE"
+        (.alerts[] | "  - [Severity: \(.security_vulnerability.severity)] \(.security_vulnerability.package.name)\n    Vulnerable Version Range: \(.vulnerable_version_range)\n    Patched Version: \(.patched_version)\n") +
+        "\n"' "$OUTPUT_FILE" 2>/dev/null | tee -a "$LOG_FILE" || {
+        # Fallback if the alert structure is different
+        jq -r '.repositories[] | select(.alertCount > 0) | "\(.name): \(.alertCount) alert(s)"' "$OUTPUT_FILE" | tee -a "$LOG_FILE"
+    }
 fi
 
 echo "" | tee -a "$LOG_FILE"
