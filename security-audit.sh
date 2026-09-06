@@ -75,11 +75,11 @@ TOTAL_ALERTS=0
 while true; do
     echo -e "${BLUE}Fetching repositories...${NC}" | tee -a "$LOG_FILE"
     
-    # Build query with cursor
+    # Build query with cursor (removed cvss.vector which doesn't exist)
     if [ "$CURSOR" = "null" ]; then
-        QUERY="query { repositoryOwner(login: \"$GITHUB_USER\") { repositories(first: 100, orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage endCursor } nodes { name url isPrivate vulnerabilityAlerts(first: 100) { totalCount nodes { number state dismissReason securityVulnerability { severity package { name ecosystem } advisory { summary description cvss { score vector } } firstPatchedVersion { identifier } } vulnerableManifestFilename vulnerableManifestPath } } } } } }"
+        QUERY="query { repositoryOwner(login: \"$GITHUB_USER\") { repositories(first: 100, orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage endCursor } nodes { name url isPrivate vulnerabilityAlerts(first: 100) { totalCount nodes { number state dismissReason securityVulnerability { severity package { name ecosystem } advisory { summary description cvss { score } } firstPatchedVersion { identifier } } vulnerableManifestFilename vulnerableManifestPath } } } } } }"
     else
-        QUERY="query { repositoryOwner(login: \"$GITHUB_USER\") { repositories(first: 100, after: \"$CURSOR\", orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage endCursor } nodes { name url isPrivate vulnerabilityAlerts(first: 100) { totalCount nodes { number state dismissReason securityVulnerability { severity package { name ecosystem } advisory { summary description cvss { score vector } } firstPatchedVersion { identifier } } vulnerableManifestFilename vulnerableManifestPath } } } } } }"
+        QUERY="query { repositoryOwner(login: \"$GITHUB_USER\") { repositories(first: 100, after: \"$CURSOR\", orderBy: {field: NAME, direction: ASC}) { pageInfo { hasNextPage endCursor } nodes { name url isPrivate vulnerabilityAlerts(first: 100) { totalCount nodes { number state dismissReason securityVulnerability { severity package { name ecosystem } advisory { summary description cvss { score } } firstPatchedVersion { identifier } } vulnerableManifestFilename vulnerableManifestPath } } } } } }"
     fi
     
     # Execute query
@@ -92,7 +92,6 @@ while true; do
     if echo "$RESPONSE" | jq -e '.errors' &>/dev/null; then
         ERROR_MSG=$(echo "$RESPONSE" | jq -r '.errors[0].message // .errors[0] // .')
         echo -e "${RED}GraphQL Error: $ERROR_MSG${NC}" | tee -a "$LOG_FILE"
-        echo -e "${RED}Response: $RESPONSE${NC}" | tee -a "$LOG_FILE"
         exit 1
     fi
 
